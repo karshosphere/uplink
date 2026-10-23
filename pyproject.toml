@@ -1,0 +1,27 @@
+[project]
+name = "uplink"
+version = "0.1.0"
+description = "A narrow REST server that lets the judy container act on the host"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+]
+
+[project.scripts]
+uplink = "uplink.app:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "httpx2>=2.13.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
