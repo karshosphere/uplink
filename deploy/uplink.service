@@ -1,0 +1,14 @@
+[Unit]
+Description=Uplink, the narrow host API for the judy container
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/uplink
+Restart=on-failure
+RestartSec=2
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
