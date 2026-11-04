@@ -38,5 +38,7 @@ start:
 stop:
 	systemctl --user stop $(SERVICE)
 
+# stopped first, so the install never replaces the program while it is running
 restart:
-	systemctl --user restart $(SERVICE)
+	systemctl --user is-active --quiet $(SERVICE) && systemctl --user stop $(SERVICE) || true
+	deploy/install.sh
