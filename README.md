@@ -115,18 +115,18 @@ make start        # runs deploy/install.sh
 It creates the config and state directories, generates a token if there is none,
 installs Uplink into `~/.local/bin` and enables the `uplink` systemd user
 service. uv picks the Python version that `pyproject.toml` requires and
-downloads it if the host does not have it. Run `make start` again after pulling
-changes. To keep the service running while you are logged out:
+downloads it if the host does not have it. After pulling changes, run
+`make restart`. To keep the service running while you are logged out:
 
 ```sh
 loginctl enable-linger "$USER"
 ```
 
-To stop or restart the running service without reinstalling it:
+To stop the service, or to install the current code and start it again:
 
 ```sh
 make stop
-make restart
+make restart      # stops it if it is running, then runs deploy/install.sh
 ```
 
 ## Config
