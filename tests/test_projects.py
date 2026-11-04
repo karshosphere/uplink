@@ -39,11 +39,23 @@ def fake(app, config, root):
 
 
 @pytest.fixture
-def runs(monkeypatch):
+def active_units():
+    """Remote control units the fake systemd reports as running."""
+    return set()
+
+
+@pytest.fixture
+def runs(monkeypatch, active_units):
     calls = []
 
-    def run(command, cwd, timeout, **kwargs):
+    def run(command, cwd=None, timeout=None, **kwargs):
         calls.append({"command": command, "cwd": cwd, "timeout": timeout, **kwargs})
+        if command[1:3] == ["--user", "is-active"]:
+            return SimpleNamespace(
+                returncode=0 if command[-1] in active_units else 3,
+                stdout="",
+                stderr="",
+            )
         return SimpleNamespace(returncode=0, stdout="started\n", stderr="")
 
     monkeypatch.setattr(
@@ -172,6 +184,178 @@ def test_audits_d(client, auth, fake, runs, config):
     assert record["project"] == "blog"
     assert record["command"] == ["/usr/local/bin/d", "up"]
     assert record["exit_code"] == 0
+
+
+def commands(runs):
+    return [call["command"] for call in runs]
+
+
+SYSTEMD_RUN_BLOG = [
+    "/usr/local/bin/systemd-run",
+    "--user",
+    "--unit=uplink-remote-blog",
+    "--collect",
+    "--quiet",
+]
+
+
+def test_restart_restarts_then_starts_remote_control(client, auth, fake, runs, root):
+    response = client.post("/projects/blog/restart", headers=auth)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["exit_code"] == 0
+    assert body["remote"] == {"unit": "uplink-remote-blog", "status": "started"}
+    stop, restart, remote = commands(runs)
+    assert stop == ["/usr/local/bin/systemctl", "--user", "stop", "uplink-remote-blog"]
+    assert restart == ["/usr/local/bin/d", "restart"]
+    assert runs[1]["cwd"] == (root / "blog").resolve()
+    assert remote[:5] == SYSTEMD_RUN_BLOG
+    assert remote[5] == f"--working-directory={(root / 'blog').resolve()}"
+    assert remote[-3:] == ["--", "/usr/local/bin/d", "cr"]
+
+
+def test_restart_skips_remote_control_when_restart_fails(
+    client, auth, fake, monkeypatch, runs
+):
+    def run(command, **kwargs):
+        runs.append({"command": command, **kwargs})
+        return SimpleNamespace(returncode=1, stdout="", stderr="no such service\n")
+
+    monkeypatch.setattr(projects_module.subprocess, "run", run)
+    body = client.post("/projects/blog/restart", headers=auth).json()
+    assert body["exit_code"] == 1
+    assert body["remote"] is None
+    assert not any("systemd-run" in c[0] for c in commands(runs))
+
+
+def test_ensure_running_starts_a_stopped_project(client, auth, fake, runs):
+    body = client.post("/projects/shop/ensure-running", headers=auth).json()
+    assert body["started"] is True
+    assert body["up"]["command"] == ["/usr/local/bin/d", "up"]
+    assert body["up"]["exit_code"] == 0
+    assert body["remote"] == {"unit": "uplink-remote-shop", "status": "started"}
+    assert [c[:3] for c in commands(runs)] == [
+        ["/usr/local/bin/d", "up"],
+        ["/usr/local/bin/systemctl", "--user", "is-active"],
+        ["/usr/local/bin/systemd-run", "--user", "--unit=uplink-remote-shop"],
+    ]
+
+
+def test_ensure_running_leaves_a_running_project_up(client, auth, fake, runs):
+    body = client.post("/projects/blog/ensure-running", headers=auth).json()
+    assert body["started"] is False
+    assert body["up"] is None
+    assert body["remote"]["status"] == "started"
+    assert ["/usr/local/bin/d", "up"] not in commands(runs)
+
+
+def test_ensure_running_keeps_a_running_remote_session(
+    client, auth, fake, runs, active_units
+):
+    active_units.add("uplink-remote-blog")
+    body = client.post("/projects/blog/ensure-running", headers=auth).json()
+    assert body["remote"] == {"unit": "uplink-remote-blog", "status": "already_running"}
+    assert not any("systemd-run" in c[0] for c in commands(runs))
+
+
+def test_ensure_running_stops_when_up_fails(client, auth, fake, monkeypatch, runs):
+    def run(command, **kwargs):
+        runs.append({"command": command, **kwargs})
+        return SimpleNamespace(returncode=1, stdout="", stderr="build failed\n")
+
+    monkeypatch.setattr(projects_module.subprocess, "run", run)
+    body = client.post("/projects/shop/ensure-running", headers=auth).json()
+    assert body["up"]["exit_code"] == 1
+    assert body["remote"] is None
+    assert commands(runs) == [["/usr/local/bin/d", "up"]]
+
+
+def test_remote_control_that_fails_to_start_is_reported(
+    client, auth, fake, monkeypatch, runs
+):
+    def run(command, **kwargs):
+        runs.append({"command": command, **kwargs})
+        if command[0].endswith("systemd-run"):
+            return SimpleNamespace(returncode=1, stdout="", stderr="unit exists\n")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(projects_module.subprocess, "run", run)
+    body = client.post("/projects/blog/restart", headers=auth).json()
+    assert body["remote"] == {
+        "unit": "uplink-remote-blog",
+        "status": "failed",
+        "detail": "unit exists\n",
+    }
+
+
+def test_remote_control_that_hangs_is_reported(client, auth, fake, monkeypatch, runs):
+    def run(command, **kwargs):
+        runs.append({"command": command, **kwargs})
+        if command[0].startswith("/usr/local/bin/systemd") or command[0].endswith(
+            "systemctl"
+        ):
+            raise projects_module.subprocess.TimeoutExpired(command, 30)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(projects_module.subprocess, "run", run)
+    body = client.post("/projects/blog/ensure-running", headers=auth).json()
+    assert body["remote"] == {
+        "unit": "uplink-remote-blog",
+        "status": "failed",
+        "detail": "systemd-run timed out",
+    }
+
+
+@pytest.mark.parametrize("action", ["restart", "ensure-running"])
+def test_new_actions_refuse_protected_projects(client, auth, fake, runs, action):
+    response = client.post(f"/projects/Judy/{action}", headers=auth)
+    assert response.status_code == 403
+    assert response.json()["error"] == "protected"
+    assert runs == []
+
+
+@pytest.mark.parametrize("action", ["restart", "ensure-running"])
+def test_new_actions_need_systemd(client, auth, fake, monkeypatch, runs, action):
+    monkeypatch.setattr(
+        projects_module.shutil,
+        "which",
+        lambda name: None if name == "systemd-run" else f"/usr/local/bin/{name}",
+    )
+    response = client.post(f"/projects/blog/{action}", headers=auth)
+    assert response.status_code == 503
+    assert response.json()["error"] == "systemd_unavailable"
+    assert runs == []
+
+
+@pytest.mark.parametrize("action", ["restart", "ensure-running"])
+def test_new_actions_wait_their_turn(client, auth, fake, runs, app, action):
+    lock = app.state.projects._locks["blog"]
+    lock.acquire()
+    try:
+        response = client.post(f"/projects/blog/{action}", headers=auth)
+    finally:
+        lock.release()
+    assert response.status_code == 409
+    assert response.json()["error"] == "busy"
+    assert runs == []
+
+
+def test_new_actions_are_audited(client, auth, fake, runs, config):
+    client.post("/projects/blog/restart", headers=auth)
+    client.post("/projects/shop/ensure-running", headers=auth)
+    restart, ensure = [
+        json.loads(line) for line in config.audit_log.read_text().splitlines()[-2:]
+    ]
+    assert (restart["action"], restart["exit_code"], restart["remote"]) == (
+        "restart",
+        0,
+        "started",
+    )
+    assert (ensure["action"], ensure["started"], ensure["remote"]) == (
+        "ensure-running",
+        True,
+        "started",
+    )
 
 
 @pytest.mark.parametrize(

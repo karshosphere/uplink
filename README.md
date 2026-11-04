@@ -74,6 +74,8 @@ addressing a container by ID does not get round them.
 | GET    | `/projects`           | folders in `projects_dir` that devenv set up, and their containers |
 | POST   | `/projects/{name}/up` | `d up` in the project folder                          |
 | POST   | `/projects/{name}/down` | `d down` in the project folder                      |
+| POST   | `/projects/{name}/restart` | `d restart`, then Claude remote control with `d cr` |
+| POST   | `/projects/{name}/ensure-running` | `d up` only if nothing is running, then `d cr` unless it already runs |
 | POST   | `/projects/fork`      | fork a repository into a new project (not built yet)  |
 
 Projects are set up by devenv, from [agent-base](https://github.com/karshosphere/agent-base).
@@ -83,7 +85,15 @@ directly inside `projects_dir` (not a symlink). Its compose file must be at
 as devenv names it, and the `.env` beside it must give that folder as
 `PROJECT_ROOT`. Anything else is refused before `d` runs.
 Projects in `protected_projects` are listed, marked `"protected": true`, but
-`up` and `down` on them get `403 protected`.
+`up`, `down`, `restart` and `ensure-running` on them get `403 protected`.
+
+`restart` and `ensure-running` start Claude remote control in the project's
+container with `d cr`, once the container is up. It runs as its own systemd user
+unit, `uplink-remote-<slug>`, so the session outlives a restart of Uplink, and its
+output is in `journalctl --user -u uplink-remote-<slug>`. `restart` stops that
+unit before restarting the container; `ensure-running` leaves a running one alone.
+Both need `systemctl` and `systemd-run` on the host, and answer
+`503 systemd_unavailable` without touching the project when either is missing.
 
 `/projects/fork` takes `{"name": "<folder>", "url": "https://github.com/<owner>/<repo>"}`.
 The name follows the rules above and must not exist yet; the URL must be a plain

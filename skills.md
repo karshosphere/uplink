@@ -98,6 +98,8 @@ compose file lives on the host, out of every container's reach.
 | `GET /projects` | lists projects: `name`, `path`, `protected`, and `containers` (each with `name`, `state`, `status`) |
 | `POST /projects/{name}/up` | runs `d up` in the project folder |
 | `POST /projects/{name}/down` | runs `d down` in the project folder |
+| `POST /projects/{name}/restart` | restarts the project's container, then starts Claude remote control in it |
+| `POST /projects/{name}/ensure-running` | brings the project up if it is not running, and starts remote control unless it already runs |
 | `POST /projects/fork` | not built yet; see below |
 
 `up` and `down` answer only when the command finishes, which can take several
@@ -125,10 +127,42 @@ The response tells you how it went:
 - `"timed_out": true` means the run was killed at the host's limit and
   `exit_code` is `null`.
 - `stdout` and `stderr` hold the last 64 KiB of output each.
-- Only one `up` or `down` runs per project at a time. A second one gets
-  `409 busy`.
+- Only one action runs per project at a time. A second one gets `409 busy`.
 - Project names must match `^[A-Za-z0-9][A-Za-z0-9._-]*$`. Protected projects
-  are listed with `"protected": true`, and `up` or `down` on them is refused.
+  are listed with `"protected": true`, and every action on them is refused.
+
+### Restarting a project, or making sure it runs
+
+`restart` answers like `up`, with one more field, `remote`, once the container is
+back:
+
+```json
+{
+  "command": ["/usr/local/bin/d", "restart"],
+  "exit_code": 0,
+  "timed_out": false,
+  "stdout": "...",
+  "stderr": "",
+  "remote": {"unit": "uplink-remote-blog", "status": "started"}
+}
+```
+
+`ensure-running` is the gentle one: it changes nothing that is already running.
+
+```json
+{
+  "started": true,
+  "up": {"command": ["/usr/local/bin/d", "up"], "exit_code": 0, "...": "..."},
+  "remote": {"unit": "uplink-remote-blog", "status": "started"}
+}
+```
+
+- `started` says whether the container had to be brought up; `up` holds that run,
+  or is `null` when it was already running.
+- `remote.status` is `started`, `already_running`, or `failed` with a `detail`.
+- `remote` is `null` when the restart or the `up` failed; check `exit_code` first.
+- Use `ensure-running` when you only need a project to be available. `restart`
+  ends whatever its agent was doing, so use it only when that is the point.
 
 `POST /projects/fork` takes `{"name": "<folder>", "url": "https://github.com/<owner>/<repo>"}`.
 It checks the name and URL and then answers `501 not_implemented`, because the
@@ -161,6 +195,7 @@ uplink POST /projects/fork -H 'Content-Type: application/json' \
 | 502 | `docker_error` | Docker refused the action | read `detail`; retrying the same action rarely helps |
 | 503 | `docker_unavailable` | Uplink cannot reach Docker | wait and try once more; report it if it persists |
 | 503 | `d_unavailable` | the host's `d` script cannot be found | report it; nothing on your side will fix it |
+| 503 | `systemd_unavailable` | the host has no `systemctl` or `systemd-run`, which `restart` and `ensure-running` need | report it; nothing was changed |
 
 A `403` is an answer, not a fault. Do not look for another way to do the same
 thing.
